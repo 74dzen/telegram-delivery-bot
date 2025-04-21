@@ -93,6 +93,60 @@ def extract_preset_key_from_text(text):
             return original
     return None
 
+def get_cdek_token():
+    response = requests.post(CDEK_AUTH_URL, data={
+        "grant_type": "client_credentials",
+        "client_id": CDEK_CLIENT_ID,
+        "client_secret": CDEK_CLIENT_SECRET
+    })
+    return response.json().get("access_token") if response.status_code == 200 else None
+
+def get_cdek_city_code(city_name, token):
+    headers = {"Authorization": f"Bearer {token}"}
+    response = requests.get(CDEK_CITY_URL, headers=headers, params={"city": city_name})
+    return response.json()[0].get("code") if response.status_code == 200 and response.json() else None
+
+def calculate_cdek_delivery(city_from, city_to, dims):
+    token = get_cdek_token()
+    if not token:
+        return "Ошибка авторизации в СДЭК."
+
+    city_from_code = get_cdek_city_code(city_from, token)
+    city_to_code = get_cdek_city_code(city_to, token)
+    if not city_from_code or not city_to_code:
+        return "Ошибка: не удалось определить коды городов."
+
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    packages = []
+    if isinstance(dims, list):
+        for l, w, h, weight in dims:
+            packages.append({"weight": int(weight * 1000), "length": int(l), "width": int(w), "height": int(h)})
+    else:
+        l, w, h, weight = dims
+        packages.append({"weight": int(weight * 1000), "length": int(l), "width": int(w), "height": int(h)})
+
+    payload = {
+        "from_location": {"code": city_from_code},
+        "to_location": {"code": city_to_code},
+        "packages": packages
+    }
+
+    response = requests.post(CDEK_TARIFFLIST_URL, headers=headers, json=payload, verify=certifi.where())
+    if response.status_code != 200:
+        return f"Ошибка при расчете: {response.status_code} - {response.text}"
+
+    data = response.json()
+    categories = {"дверь-дверь": None, "дверь-склад": None, "склад-дверь": None, "склад-склад": None}
+    for tariff in data.get("tariff_codes", []):
+        name = tariff.get("tariff_name", "").lower()
+        delivery_sum = tariff.get("delivery_sum")
+        delivery_term = f"{tariff.get('period_min', '?')} - {tariff.get('period_max', '?')} дней"
+        for cat in categories:
+            if cat in name and (categories[cat] is None or delivery_sum < categories[cat]["price"]):
+                categories[cat] = {"price": delivery_sum, "term": delivery_term}
+
+    return "\n".join([f"📦 {k}: {v['price']} руб., срок {v['term']}" if v else f"📦 {k}: тариф недоступен" for k, v in categories.items()])
+
 async def calculate_dpd_delivery(text):
     parts = re.split(r'[\s,;]+', text.strip().lower())
     try:
@@ -187,11 +241,20 @@ async def handle_input(update: Update, context: CallbackContext):
         return
 
     service = context.user_data["service"]
+    text = update.message.text.strip()
     if service == "DPD":
-        result = await calculate_dpd_delivery(update.message.text)
+        result = await calculate_dpd_delivery(text)
         await update.message.reply_text(result)
     else:
-        await update.message.reply_text("Расчет СДЭК в этой версии временно недоступен.")
+        parts = re.split(r'[\s,;]+', text.lower())
+        try:
+            name = ' '.join(parts[2:]).lower().replace('-', ' ').strip()
+            key = extract_preset_key_from_text(name)
+            dims = PRESETS.get(key)
+            result = calculate_cdek_delivery(parts[0], parts[1], dims)
+            await update.message.reply_text("Результат расчета:\n" + result)
+        except Exception:
+            await update.message.reply_text("Ошибка обработки данных. Убедитесь, что вы ввели все параметры правильно.")
 
 application.add_handler(CommandHandler("start", start))
 application.add_handler(MessageHandler(filters.Regex("^(СДЭК|DPD)$"), choose_service))
