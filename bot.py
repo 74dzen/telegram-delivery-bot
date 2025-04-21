@@ -12,6 +12,7 @@ import chardet
 import re
 import asyncio
 from flask import Flask, request
+import threading
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -86,72 +87,22 @@ def find_city_code(city_name):
         return match.iloc[0, 0]
     return None
 
-def get_cdek_token():
-    response = requests.post(CDEK_AUTH_URL, data={
-        "grant_type": "client_credentials",
-        "client_id": CDEK_CLIENT_ID,
-        "client_secret": CDEK_CLIENT_SECRET
-    })
-    return response.json().get("access_token") if response.status_code == 200 else None
-
-def get_cdek_city_code(city_name, token):
-    headers = {"Authorization": f"Bearer {token}"}
-    response = requests.get(CDEK_CITY_URL, headers=headers, params={"city": city_name})
-    return response.json()[0].get("code") if response.status_code == 200 and response.json() else None
-
-def extract_preset_key(text):
-    clean = text.lower().replace('-', ' ').strip()
-    return ALT_PRESETS.get(clean)
-
-def calculate_cdek_delivery(city_from, city_to, dims):
-    token = get_cdek_token()
-    if not token:
-        return "Ошибка авторизации в СДЭК."
-
-    city_from_code = get_cdek_city_code(city_from, token)
-    city_to_code = get_cdek_city_code(city_to, token)
-    if not city_from_code or not city_to_code:
-        return "Ошибка: не удалось определить коды городов."
-
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    packages = []
-    if isinstance(dims, list):
-        for l, w, h, weight in dims:
-            packages.append({"weight": int(weight * 1000), "length": int(l), "width": int(w), "height": int(h)})
-    else:
-        l, w, h, weight = dims
-        packages.append({"weight": int(weight * 1000), "length": int(l), "width": int(w), "height": int(h)})
-
-    payload = {
-        "from_location": {"code": city_from_code},
-        "to_location": {"code": city_to_code},
-        "packages": packages
-    }
-
-    response = requests.post(CDEK_TARIFFLIST_URL, headers=headers, json=payload, verify=certifi.where())
-    if response.status_code != 200:
-        return f"Ошибка при расчете: {response.status_code} - {response.text}"
-
-    data = response.json()
-    categories = {"дверь-дверь": None, "дверь-склад": None, "склад-дверь": None, "склад-склад": None}
-    for tariff in data.get("tariff_codes", []):
-        name = tariff.get("tariff_name", "").lower()
-        delivery_sum = tariff.get("delivery_sum")
-        delivery_term = f"{tariff.get('period_min', '?')} - {tariff.get('period_max', '?')} дней"
-        for cat in categories:
-            if cat in name and (categories[cat] is None or delivery_sum < categories[cat]["price"]):
-                categories[cat] = {"price": delivery_sum, "term": delivery_term}
-
-    return "\n".join([f"📦 {k}: {v['price']} руб., срок {v['term']}" if v else f"📦 {k}: тариф недоступен" for k, v in categories.items()])
+def extract_preset_key_from_text(text):
+    for variant, original in ALT_PRESETS.items():
+        if variant in text:
+            return original
+    return None
 
 async def calculate_dpd_delivery(text):
     parts = re.split(r'[\s,;]+', text.strip().lower())
     try:
-        name = ' '.join(parts[2:-3]).lower().replace('-', ' ').strip()
-        key = extract_preset_key(name)
-        dims = PRESETS.get(key)
         pickup_city, delivery_city = parts[0], parts[1]
         pickup_type, delivery_type, declared_value = parts[-3:]
+
+        body = ' '.join(parts[2:-3])
+        key = extract_preset_key_from_text(body)
+        dims = PRESETS.get(key)
+
         pickup_code = find_city_code(pickup_city)
         delivery_code = find_city_code(delivery_city)
         if pickup_code is None or delivery_code is None:
@@ -193,6 +144,7 @@ async def calculate_dpd_delivery(text):
 
     except Exception:
         return "Ошибка: недостаточно данных для расчета DPD."
+
 
 async def start(update: Update, context: CallbackContext):
     keyboard = [["СДЭК"], ["DPD"]]
@@ -246,11 +198,17 @@ def webhook():
     return "ok"
 
 if __name__ == "__main__":
-    async def main():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    async def setup():
         await application.initialize()
         await application.start()
         await application.bot.set_webhook("https://telegram-delivery-bot.onrender.com")
+
+    def run_flask():
         port = int(os.environ.get("PORT", 10000))
         app.run(host="0.0.0.0", port=port)
 
-    asyncio.run(main())
+    threading.Thread(target=run_flask).start()
+    loop.run_until_complete(setup())
