@@ -59,7 +59,7 @@ PRESETS = {
 
 ALT_PRESETS = {}
 for key in PRESETS:
-    base = key.lower().replace('-', ' ').replace('–', ' ')
+    base = key.lower().replace('-', ' ').replace('–', ' ').replace('ко', ' ко')
     parts = base.split()
     variants = set()
     for i in range(len(parts)):
@@ -72,7 +72,7 @@ for key in PRESETS:
         ALT_PRESETS[variant.strip()] = key
 
 # Загрузка базы городов для DPD
-file_path = os.path.expanduser('~/Desktop/Delivery_dzen_bot/GeographyDPD_20250211.csv')
+file_path = 'GeographyDPD_20250211.csv'
 with open(file_path, 'rb') as f:
     detected = chardet.detect(f.read(10000))
 correct_encoding = detected['encoding']
