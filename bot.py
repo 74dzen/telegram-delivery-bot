@@ -72,7 +72,7 @@ for key in PRESETS:
         ALT_PRESETS[variant.strip()] = key
 
 # Загрузка базы городов для DPD
-file_path = os.path.expanduser('~/Desktop/GeographyDPD_20250211.csv')
+file_path = os.path.expanduser('~/Desktop/Delivery_dzen_bot/GeographyDPD_20250211.csv')
 with open(file_path, 'rb') as f:
     detected = chardet.detect(f.read(10000))
 correct_encoding = detected['encoding']
