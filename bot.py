@@ -10,6 +10,9 @@ from difflib import get_close_matches
 import os
 import chardet
 import re
+import asyncio
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import threading
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -33,29 +36,7 @@ DPD_ACCOUNTS = [
 DPD_WSDL_URL = "https://ws.dpd.ru/services/calculator2?wsdl"
 
 # Шаблоны габаритов и веса
-PRESETS = {
-    "2-секции": (95, 76, 20, 17),
-    "3-секции": (95, 76, 20, 20),
-    "4-секции": (96, 76, 34, 30),
-    "фикс-мт2": (187, 79, 21, 37),
-    "фикс-1а": (187, 79, 24, 40),
-    "фикс-0а": (187, 79, 24, 40),
-    "ммкм-1": (188, 73, 47, 76),
-    "ммкк-3ко176": (157, 61, 64, 54),
-    "ммкк-3ко172": (180, 65, 72, 75),
-    "ммкм-2": [(171, 64.5, 51, 30), (127, 22.5, 76, 60)],
-    "км-3007": (212, 88, 84, 80),
-    "ммкм-2 ко-152": (200, 85, 65, 130),
-    "ммкм-2 ко-153": (207, 85, 78, 140),
-    "ммкм-2 ко-154": (199, 92, 74, 171),
-    "ммкм-2 ко-155": (213, 82, 69, 142),
-    "ммкм-2 ко-156": (208, 80, 70, 125),
-    "ммкм-2 ко-157": (213, 92, 87, 200),
-    "ммкм-2 ко-158": (213, 93, 83, 189),
-    "ммкм-2 ко-159": (213, 93, 86, 162),
-    "ммкм-2 ко-160": (206, 90, 67, 123),
-    "ммкк-3 ко-177": (150, 61, 61, 68)
-}
+PRESETS = {"2-секции": (95, 76, 20, 17), "3-секции": (95, 76, 20, 20), "4-секции": (96, 76, 34, 30), "фикс-мт2": (187, 79, 21, 37), "фикс-1а": (187, 79, 24, 40), "фикс-0а": (187, 79, 24, 40), "ммкм-1": (188, 73, 47, 76), "ммкк-3ко176": (157, 61, 64, 54), "ммкк-3ко172": (180, 65, 72, 75), "ммкм-2": [(171, 64.5, 51, 30), (127, 22.5, 76, 60)], "км-3007": (212, 88, 84, 80), "ммкм-2 ко-152": (200, 85, 65, 130), "ммкм-2 ко-153": (207, 85, 78, 140), "ммкм-2 ко-154": (199, 92, 74, 171), "ммкм-2 ко-155": (213, 82, 69, 142), "ммкм-2 ко-156": (208, 80, 70, 125), "ммкм-2 ко-157": (213, 92, 87, 200), "ммкм-2 ко-158": (213, 93, 83, 189), "ммкм-2 ко-159": (213, 93, 86, 162), "ммкм-2 ко-160": (206, 90, 67, 123), "ммкк-3 ко-177": (150, 61, 61, 68)}
 
 ALT_PRESETS = {}
 for key in PRESETS:
@@ -86,11 +67,7 @@ def find_city_code(city_name):
     return None
 
 def get_cdek_token():
-    response = requests.post(CDEK_AUTH_URL, data={
-        "grant_type": "client_credentials",
-        "client_id": CDEK_CLIENT_ID,
-        "client_secret": CDEK_CLIENT_SECRET
-    })
+    response = requests.post(CDEK_AUTH_URL, data={"grant_type": "client_credentials", "client_id": CDEK_CLIENT_ID, "client_secret": CDEK_CLIENT_SECRET})
     return response.json().get("access_token") if response.status_code == 200 else None
 
 def get_cdek_city_code(city_name, token):
@@ -121,12 +98,7 @@ def calculate_cdek_delivery(city_from, city_to, dims):
         l, w, h, weight = dims
         packages.append({"weight": int(weight * 1000), "length": int(l), "width": int(w), "height": int(h)})
 
-    payload = {
-        "from_location": {"code": city_from_code},
-        "to_location": {"code": city_to_code},
-        "packages": packages
-    }
-
+    payload = {"from_location": {"code": city_from_code}, "to_location": {"code": city_to_code}, "packages": packages}
     response = requests.post(CDEK_TARIFFLIST_URL, headers=headers, json=payload, verify=certifi.where())
     if response.status_code != 200:
         return f"Ошибка при расчете: {response.status_code} - {response.text}"
@@ -235,5 +207,24 @@ application.add_handler(CommandHandler("start", start))
 application.add_handler(MessageHandler(filters.Regex("^(СДЭК|DPD)$"), choose_service))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_input))
 
+def run_web_server():
+    class SimpleHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"Bot is running")
+
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), SimpleHandler)
+    server.serve_forever()
+
 if __name__ == "__main__":
-    application.run_polling()
+    threading.Thread(target=run_web_server, daemon=True).start()
+
+    async def main():
+        await application.initialize()
+        await application.start()
+        await application.bot.set_webhook("https://telegram-delivery-bot.onrender.com")
+        await asyncio.Event().wait()
+
+    asyncio.run(main())
