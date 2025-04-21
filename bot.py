@@ -145,59 +145,27 @@ async def calculate_dpd_delivery(text):
     except Exception:
         return "Ошибка: недостаточно данных для расчета DPD."
 
-
-async def start(update: Update, context: CallbackContext):
-    keyboard = [["СДЭК"], ["DPD"]]
-    reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
-    context.user_data.clear()
-    await update.message.reply_text("Выберите службу доставки:", reply_markup=reply_markup)
-
-async def choose_service(update: Update, context: CallbackContext):
-    context.user_data.clear()
-    context.user_data["service"] = update.message.text
-    if update.message.text == "СДЭК":
-        await update.message.reply_text("Введите данные в формате: Город-отправитель, Город-получатель, Длина, Ширина, Высота, Вес или название шаблона")
-    else:
-        await update.message.reply_text("Введите данные в формате: Город_отправки, Город_доставки, Длина_см, Ширина_см, Высота_см, Вес_в_кг, Забор(курьер/пункт), Доставка(курьер/пункт), Объявленная_стоимость_руб.")
-
-async def handle_input(update: Update, context: CallbackContext):
-    if "service" not in context.user_data:
-        await update.message.reply_text("Пожалуйста, сначала выберите службу доставки командой /start")
-        return
-
-    text = update.message.text.strip()
-    parts = re.split(r'[\s,;]+', text.lower())
-    service = context.user_data["service"]
-
-    if service == "СДЭК":
-        try:
-            name = ' '.join(parts[2:]).lower().replace('-', ' ').strip()
-            key = extract_preset_key(name)
-            dims = PRESETS.get(key)
-            result = calculate_cdek_delivery(parts[0], parts[1], dims)
-            await update.message.reply_text("Результат расчета:\n" + result)
-        except Exception:
-            await update.message.reply_text("Ошибка обработки данных. Убедитесь, что вы ввели все параметры правильно.")
-
-    elif service == "DPD":
-        result = await calculate_dpd_delivery(text)
-        await update.message.reply_text(result)
-
-application = Application.builder().token(TOKEN).build()
-application.add_handler(CommandHandler("start", start))
-application.add_handler(MessageHandler(filters.Regex("^(СДЭК|DPD)$"), choose_service))
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_input))
-
-# Flask сервер
 app = Flask(__name__)
 
-@app.route("/", methods=["POST"])
+@app.route('/', methods=['GET', 'HEAD'])
+def index():
+    return 'OK'
+
+@app.route('/', methods=['POST'])
 def webhook():
-    update = Update.de_json(request.get_json(force=True), application.bot)
+    data = request.get_json(force=True)
+    update = Update.de_json(data, application.bot)
     asyncio.run(application.process_update(update))
-    return "ok"
+    return 'OK'
+
+application = Application.builder().token(TOKEN).build()
+application.add_handler(CommandHandler("start", lambda update, context: update.message.reply_text("Выберите службу доставки:", reply_markup=ReplyKeyboardMarkup([["СДЭК"], ["DPD"]], one_time_keyboard=True, resize_keyboard=True))))
+application.add_handler(MessageHandler(filters.Regex("^(СДЭК|DPD)$"), lambda update, context: context.user_data.update({"service": update.message.text}) or update.message.reply_text("Введите данные")))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, lambda update, context: update.message.reply_text("Обработка данных...")))
 
 if __name__ == "__main__":
+    import threading
+
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
