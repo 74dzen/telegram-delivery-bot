@@ -155,7 +155,14 @@ def index():
 def webhook():
     data = request.get_json(force=True)
     update = Update.de_json(data, application.bot)
-    asyncio.get_event_loop().create_task(application.process_update(update))
+    future = asyncio.run_coroutine_threadsafe(
+        application.process_update(update),
+        loop
+    )
+    try:
+        future.result()
+    except Exception as e:
+        logger.error(f"Ошибка при обработке обновления: {e}")
     return 'OK'
 
 application = Application.builder().token(TOKEN).build()
@@ -191,8 +198,6 @@ application.add_handler(MessageHandler(filters.Regex("^(СДЭК|DPD)$"), choose
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_input))
 
 if __name__ == "__main__":
-    import threading
-
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
