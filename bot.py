@@ -155,13 +155,40 @@ def index():
 def webhook():
     data = request.get_json(force=True)
     update = Update.de_json(data, application.bot)
-    asyncio.run(application.process_update(update))
+    asyncio.get_event_loop().create_task(application.process_update(update))
     return 'OK'
 
 application = Application.builder().token(TOKEN).build()
-application.add_handler(CommandHandler("start", lambda update, context: update.message.reply_text("Выберите службу доставки:", reply_markup=ReplyKeyboardMarkup([["СДЭК"], ["DPD"]], one_time_keyboard=True, resize_keyboard=True))))
-application.add_handler(MessageHandler(filters.Regex("^(СДЭК|DPD)$"), lambda update, context: context.user_data.update({"service": update.message.text}) or update.message.reply_text("Введите данные")))
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, lambda update, context: update.message.reply_text("Обработка данных...")))
+
+async def start(update: Update, context: CallbackContext):
+    keyboard = [["СДЭК"], ["DPD"]]
+    reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+    context.user_data.clear()
+    await update.message.reply_text("Выберите службу доставки:", reply_markup=reply_markup)
+
+async def choose_service(update: Update, context: CallbackContext):
+    context.user_data.clear()
+    context.user_data["service"] = update.message.text
+    if update.message.text == "СДЭК":
+        await update.message.reply_text("Введите данные в формате: Город-отправитель, Город-получатель, Длина, Ширина, Высота, Вес или название шаблона")
+    else:
+        await update.message.reply_text("Введите данные в формате: Город_отправки, Город_доставки, шаблон, пункт/курьер, пункт/курьер, объявленная_стоимость")
+
+async def handle_input(update: Update, context: CallbackContext):
+    if "service" not in context.user_data:
+        await update.message.reply_text("Пожалуйста, сначала выберите службу доставки командой /start")
+        return
+
+    service = context.user_data["service"]
+    if service == "DPD":
+        result = await calculate_dpd_delivery(update.message.text)
+        await update.message.reply_text(result)
+    else:
+        await update.message.reply_text("Расчет СДЭК в этой версии временно недоступен.")
+
+application.add_handler(CommandHandler("start", start))
+application.add_handler(MessageHandler(filters.Regex("^(СДЭК|DPD)$"), choose_service))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_input))
 
 if __name__ == "__main__":
     import threading
@@ -179,4 +206,5 @@ if __name__ == "__main__":
         app.run(host="0.0.0.0", port=port)
 
     threading.Thread(target=run_flask).start()
-    loop.run_until_complete(setup())
+    loop.create_task(setup())
+    loop.run_forever()
