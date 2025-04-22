@@ -136,16 +136,14 @@ def calculate_cdek_delivery(city_from, city_to, dims):
         return f"Ошибка при расчете: {response.status_code} - {response.text}"
 
     data = response.json()
-    categories = {"дверь-дверь": None, "дверь-склад": None, "склад-дверь": None, "склад-склад": None}
+    results = []
     for tariff in data.get("tariff_codes", []):
-        name = tariff.get("tariff_name", "").lower()
-        delivery_sum = tariff.get("delivery_sum")
-        delivery_term = f"{tariff.get('period_min', '?')} - {tariff.get('period_max', '?')} дней"
-        for cat in categories:
-            if cat in name and (categories[cat] is None or delivery_sum < categories[cat]["price"]):
-                categories[cat] = {"price": delivery_sum, "term": delivery_term}
+        name = tariff.get("tariff_name", "")
+        price = tariff.get("delivery_sum")
+        term = f"{tariff.get('period_min')}–{tariff.get('period_max')} дн."
+        results.append(f"{name}: {price} руб., срок: {term}")
 
-    return "\n".join([f"📦 {k}: {v['price']} руб., срок {v['term']}" if v else f"📦 {k}: тариф недоступен" for k, v in categories.items()])
+    return "\n".join(results) if results else "Тарифы не найдены."
 
 async def calculate_dpd_delivery(text):
     parts = re.split(r'[\s,;]+', text.strip().lower())
@@ -179,25 +177,25 @@ async def calculate_dpd_delivery(text):
                     'delivery': {'cityId': delivery_code},
                     'selfPickup': self_pickup,
                     'selfDelivery': self_delivery,
-                    'weight': weight,
-                    'volume': volume,
+                    'weight': round(weight, 3),
+                    'volume': round(volume, 6),
                     'declaredValue': float(declared_value)
                 }
                 try:
                     resp = client.service.getServiceCost2(request=req)
-                    filtered = [s for s in resp if 'MAX domestic' not in s['serviceName']]
+                    filtered = [s for s in resp if 'MAX' not in s['serviceName'].upper()]
                     if filtered:
                         best = min(filtered, key=lambda x: x['cost'])
                         total_cost += best['cost']
                         max_days = max(max_days, best['days'])
-                except:
-                    return f"ЛК {account['clientNumber']}: ошибка при расчете."
+                except Exception as e:
+                    return f"ЛК {account['clientNumber']}: ошибка при расчете.\n{e}"
 
             results.append(f"ЛК {account['clientNumber']}: {round(total_cost, 2)} руб., срок {max_days} дней")
         return "Результат расчета:\n" + "\n".join(results)
 
-    except Exception:
-        return "Ошибка: недостаточно данных для расчета DPD."
+    except Exception as e:
+        return f"Ошибка: {e}"
 
 app = Flask(__name__)
 
@@ -209,14 +207,7 @@ def index():
 def webhook():
     data = request.get_json(force=True)
     update = Update.de_json(data, application.bot)
-    future = asyncio.run_coroutine_threadsafe(
-        application.process_update(update),
-        loop
-    )
-    try:
-        future.result()
-    except Exception as e:
-        logger.error(f"Ошибка при обработке обновления: {e}")
+    asyncio.run(application.process_update(update))
     return 'OK'
 
 application = Application.builder().token(TOKEN).build()
@@ -224,55 +215,47 @@ application = Application.builder().token(TOKEN).build()
 async def start(update: Update, context: CallbackContext):
     keyboard = [["СДЭК"], ["DPD"]]
     reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
-    context.user_data.clear()
     await update.message.reply_text("Выберите службу доставки:", reply_markup=reply_markup)
 
 async def choose_service(update: Update, context: CallbackContext):
     context.user_data.clear()
     context.user_data["service"] = update.message.text
     if update.message.text == "СДЭК":
-        await update.message.reply_text("Введите данные в формате: Город-отправитель, Город-получатель, Длина, Ширина, Высота, Вес или название шаблона")
+        await update.message.reply_text("Введите: город-отправитель, город-получатель, шаблон (например, 2-секции)")
     else:
-        await update.message.reply_text("Введите данные в формате: Город_отправки, Город_доставки, шаблон, пункт/курьер, пункт/курьер, объявленная_стоимость")
+        await update.message.reply_text("Введите: город_отправки, город_доставки, шаблон, тип_забора, тип_доставки, стоимость")
 
 async def handle_input(update: Update, context: CallbackContext):
-    if "service" not in context.user_data:
-        await update.message.reply_text("Пожалуйста, сначала выберите службу доставки командой /start")
-        return
-
-    service = context.user_data["service"]
+    service = context.user_data.get("service")
     text = update.message.text.strip()
     if service == "DPD":
         result = await calculate_dpd_delivery(text)
-        await update.message.reply_text(result)
-    else:
-        parts = re.split(r'[\s,;]+', text.lower())
-        try:
-            name = ' '.join(parts[2:]).lower().replace('-', ' ').strip()
-            key = extract_preset_key_from_text(name)
+    elif service == "СДЭК":
+        parts = re.split(r'[\s,;]+', text.strip())
+        if len(parts) >= 3:
+            city_from, city_to = parts[0], parts[1]
+            key = extract_preset_key_from_text(' '.join(parts[2:]))
             dims = PRESETS.get(key)
-            result = calculate_cdek_delivery(parts[0], parts[1], dims)
-            await update.message.reply_text("Результат расчета:\n" + result)
-        except Exception:
-            await update.message.reply_text("Ошибка обработки данных. Убедитесь, что вы ввели все параметры правильно.")
+            if dims:
+                result = calculate_cdek_delivery(city_from, city_to, dims)
+            else:
+                result = "Не удалось распознать шаблон габаритов."
+        else:
+            result = "Недостаточно данных для расчета."
+    else:
+        result = "Сначала выберите службу доставки."
+    await update.message.reply_text(result)
 
 application.add_handler(CommandHandler("start", start))
 application.add_handler(MessageHandler(filters.Regex("^(СДЭК|DPD)$"), choose_service))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_input))
 
-if __name__ == "__main__":
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-
-    async def setup():
-        await application.initialize()
-        await application.start()
-        await application.bot.set_webhook("https://telegram-delivery-bot.onrender.com")
-
-    def run_flask():
+if __name__ == '__main__':
+    def run():
         port = int(os.environ.get("PORT", 10000))
         app.run(host="0.0.0.0", port=port)
 
-    threading.Thread(target=run_flask).start()
-    loop.create_task(setup())
-    loop.run_forever()
+    threading.Thread(target=run).start()
+    asyncio.run(application.initialize())
+    asyncio.run(application.start())
+    asyncio.run(application.bot.set_webhook("https://telegram-delivery-bot.onrender.com"))
