@@ -39,6 +39,9 @@ DPD_ACCOUNTS = [
 ]
 DPD_WSDL_URL = "https://ws.dpd.ru/services/calculator2?wsdl"
 
+# Загрузка базы городов для DPD
+cities_df = pd.read_csv("GeographyDPD_20250211.csv", sep=";", encoding=chardet.detect(open("GeographyDPD_20250211.csv", "rb").read())['encoding'])
+
 # Шаблоны габаритов и веса
 PRESETS = {
     "2-секции": (95, 76, 20, 17),
@@ -78,24 +81,10 @@ for key in PRESETS:
     for variant in variants:
         ALT_PRESETS[variant.strip()] = key
 
-file_path = 'GeographyDPD_20250211.csv'
-with open(file_path, 'rb') as f:
-    detected = chardet.detect(f.read(10000))
-correct_encoding = detected['encoding']
-cities_df = pd.read_csv(file_path, sep=';', encoding=correct_encoding)
-city_names = cities_df.iloc[:, 3].dropna().unique().tolist()
-
+# Вспомогательные функции
 def find_city_code(city_name):
     match = cities_df[cities_df.iloc[:, 3].str.contains(f'^{city_name}$', case=False, na=False)]
-    if not match.empty:
-        return match.iloc[0, 0]
-    return None
-
-def extract_preset_key_from_text(text):
-    for variant, original in ALT_PRESETS.items():
-        if variant in text:
-            return original
-    return None
+    return match.iloc[0, 0] if not match.empty else None
 
 def get_cdek_token():
     response = requests.post(CDEK_AUTH_URL, data={
@@ -110,97 +99,84 @@ def get_cdek_city_code(city_name, token):
     response = requests.get(CDEK_CITY_URL, headers=headers, params={"city": city_name})
     return response.json()[0].get("code") if response.status_code == 200 and response.json() else None
 
-def calculate_cdek_delivery(city_from, city_to, dims):
-    token = get_cdek_token()
-    if not token:
-        return "Ошибка авторизации в СДЭК."
-
-    city_from_code = get_cdek_city_code(city_from, token)
-    city_to_code = get_cdek_city_code(city_to, token)
-    if not city_from_code or not city_to_code:
-        return "Ошибка: не удалось определить коды городов."
-
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    packages = []
-    if isinstance(dims, list):
-        for l, w, h, weight in dims:
-            packages.append({"weight": int(weight * 1000), "length": int(l), "width": int(w), "height": int(h)})
-    else:
-        l, w, h, weight = dims
-        packages.append({"weight": int(weight * 1000), "length": int(l), "width": int(w), "height": int(h)})
-
-    payload = {
-        "from_location": {"code": city_from_code},
-        "to_location": {"code": city_to_code},
-        "packages": packages
-    }
-
-    response = requests.post(CDEK_TARIFFLIST_URL, headers=headers, json=payload, verify=certifi.where())
-    if response.status_code != 200:
-        return f"Ошибка при расчете: {response.status_code} - {response.text}"
-
-    data = response.json()
-    results = []
-    for tariff in data.get("tariff_codes", []):
-        name = tariff.get("tariff_name", "")
-        price = tariff.get("delivery_sum")
-        term = f"{tariff.get('period_min')}–{tariff.get('period_max')} дн."
-        results.append(f"{name}: {price} руб., срок: {term}")
-
-    return "\n".join(results) if results else "Тарифы не найдены."
+def extract_preset_key(text):
+    clean = text.lower().replace('-', ' ').strip()
+    return ALT_PRESETS.get(clean)
 
 async def calculate_dpd_delivery(text):
-    parts = re.split(r'[\s,;]+', text.strip().lower())
     try:
+        parts = re.split(r'[\s,;]+', text.strip().lower())
+        name = ' '.join(parts[2:-3]).lower().replace('-', ' ').strip()
+        key = extract_preset_key(name)
+        dims = PRESETS.get(key)
         pickup_city, delivery_city = parts[0], parts[1]
         pickup_type, delivery_type, declared_value = parts[-3:]
-
-        body = ' '.join(parts[2:-3])
-        key = extract_preset_key_from_text(body)
-        dims = PRESETS.get(key)
-
         pickup_code = find_city_code(pickup_city)
         delivery_code = find_city_code(delivery_city)
         if pickup_code is None or delivery_code is None:
-            return "Ошибка: не удалось найти один из городов в базе DPD."
-
+            return "Ошибка: не найден город."
         self_pickup = pickup_type != 'курьер'
         self_delivery = delivery_type != 'курьер'
         client = Client(DPD_WSDL_URL)
         results = []
-
         for account in DPD_ACCOUNTS:
-            total_cost = 0
-            max_days = 0
+            total_cost, max_days = 0, 0
             dims_list = dims if isinstance(dims, list) else [dims]
             for length, width, height, weight in dims_list:
                 volume = (length * width * height) / 1_000_000
                 req = {
-                    'auth': {"clientNumber": account['clientNumber'], "clientKey": account['clientKey']},
+                    'auth': account,
                     'pickup': {'cityId': pickup_code},
                     'delivery': {'cityId': delivery_code},
                     'selfPickup': self_pickup,
                     'selfDelivery': self_delivery,
-                    'weight': round(weight, 3),
-                    'volume': round(volume, 6),
+                    'weight': weight,
+                    'volume': volume,
                     'declaredValue': float(declared_value)
                 }
                 try:
                     resp = client.service.getServiceCost2(request=req)
-                    filtered = [s for s in resp if 'MAX' not in s['serviceName'].upper()]
+                    filtered = [s for s in resp if 'Economy' in s['serviceName'] or 'Classic' in s['serviceName']]
                     if filtered:
                         best = min(filtered, key=lambda x: x['cost'])
                         total_cost += best['cost']
                         max_days = max(max_days, best['days'])
-                except Exception as e:
-                    return f"ЛК {account['clientNumber']}: ошибка при расчете.\n{e}"
-
+                except:
+                    return f"ЛК {account['clientNumber']}: ошибка при расчёте."
             results.append(f"ЛК {account['clientNumber']}: {round(total_cost, 2)} руб., срок {max_days} дней")
-        return "Результат расчета:\n" + "\n".join(results)
-
+        return "Результат расчёта:\n" + "\n".join(results)
     except Exception as e:
         return f"Ошибка: {e}"
 
+def calculate_cdek_delivery(city_from, city_to, dims):
+    token = get_cdek_token()
+    if not token:
+        return "Ошибка авторизации в СДЭК."
+    from_code = get_cdek_city_code(city_from, token)
+    to_code = get_cdek_city_code(city_to, token)
+    if not from_code or not to_code:
+        return "Ошибка определения городов."
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    packages = []
+    dims_list = dims if isinstance(dims, list) else [dims]
+    for l, w, h, weight in dims_list:
+        packages.append({"weight": int(weight * 1000), "length": int(l), "width": int(w), "height": int(h)})
+    payload = {"from_location": {"code": from_code}, "to_location": {"code": to_code}, "packages": packages}
+    response = requests.post(CDEK_TARIFFLIST_URL, headers=headers, json=payload, verify=certifi.where())
+    if response.status_code != 200:
+        return f"Ошибка СДЭК: {response.status_code}"
+    data = response.json()
+    categories = {"дверь-дверь": None, "дверь-склад": None, "склад-дверь": None, "склад-склад": None}
+    for tariff in data.get("tariff_codes", []):
+        name = tariff.get("tariff_name", "").lower()
+        delivery_sum = tariff.get("delivery_sum")
+        term = f"{tariff.get('period_min', '?')}–{tariff.get('period_max', '?')} дн."
+        for cat in categories:
+            if cat in name and (categories[cat] is None or delivery_sum < categories[cat]["price"]):
+                categories[cat] = {"price": delivery_sum, "term": term}
+    return "\n".join([f"📦 {k}: {v['price']} руб., срок {v['term']}" if v else f"📦 {k}: тариф недоступен" for k, v in categories.items()])
+
+# Flask
 app = Flask(__name__)
 
 @app.route('/', methods=['GET', 'HEAD'])
@@ -209,57 +185,57 @@ def index():
 
 @app.route('/', methods=['POST'])
 def webhook():
-    data = request.get_json(force=True)
-    update = Update.de_json(data, application.bot)
-    asyncio.run(application.process_update(update))
+    update = Update.de_json(request.get_json(force=True), application.bot)
+    asyncio.get_running_loop().create_task(application.process_update(update))
     return 'OK'
 
-application = Application.builder().token(TOKEN).build()
-
+# Обработчики
 async def start(update: Update, context: CallbackContext):
     keyboard = [["СДЭК"], ["DPD"]]
     reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+    context.user_data.clear()
     await update.message.reply_text("Выберите службу доставки:", reply_markup=reply_markup)
 
 async def choose_service(update: Update, context: CallbackContext):
     context.user_data.clear()
     context.user_data["service"] = update.message.text
     if update.message.text == "СДЭК":
-        await update.message.reply_text("Введите: город-отправитель, город-получатель, шаблон (например, 2-секции)")
+        await update.message.reply_text("Введите: Город-отправитель, Город-получатель, Шаблон")
     else:
-        await update.message.reply_text("Введите: город_отправки, город_доставки, шаблон, тип_забора, тип_доставки, стоимость")
+        await update.message.reply_text("Формат: Город_отправки, Город_доставки, Шаблон, Забор, Доставка, Страховка")
 
 async def handle_input(update: Update, context: CallbackContext):
-    service = context.user_data.get("service")
+    if "service" not in context.user_data:
+        await update.message.reply_text("Сначала выберите службу доставки через /start")
+        return
     text = update.message.text.strip()
-    if service == "DPD":
-        result = await calculate_dpd_delivery(text)
-    elif service == "СДЭК":
-        parts = re.split(r'[\s,;]+', text.strip())
-        if len(parts) >= 3:
-            city_from, city_to = parts[0], parts[1]
-            key = extract_preset_key_from_text(' '.join(parts[2:]))
+    parts = re.split(r'[\s,;]+', text.lower())
+    service = context.user_data["service"]
+    if service == "СДЭК":
+        try:
+            name = ' '.join(parts[2:]).lower().replace('-', ' ').strip()
+            key = extract_preset_key(name)
             dims = PRESETS.get(key)
-            if dims:
-                result = calculate_cdek_delivery(city_from, city_to, dims)
-            else:
-                result = "Не удалось распознать шаблон габаритов."
-        else:
-            result = "Недостаточно данных для расчета."
-    else:
-        result = "Сначала выберите службу доставки."
-    await update.message.reply_text(result)
+            result = calculate_cdek_delivery(parts[0], parts[1], dims)
+            await update.message.reply_text("Результат расчёта:\n" + result)
+        except Exception:
+            await update.message.reply_text("Ошибка! Проверьте формат.")
+    elif service == "DPD":
+        result = await calculate_dpd_delivery(text)
+        await update.message.reply_text(result)
 
+# Telegram приложение
+application = Application.builder().token(TOKEN).build()
 application.add_handler(CommandHandler("start", start))
 application.add_handler(MessageHandler(filters.Regex("^(СДЭК|DPD)$"), choose_service))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_input))
 
-if __name__ == '__main__':
-    def run():
-        port = int(os.environ.get("PORT", 10000))
-        app.run(host="0.0.0.0", port=port)
+# Запуск
+if __name__ == "__main__":
+    async def main():
+        await application.initialize()
+        await application.start()
+        await application.bot.set_webhook("https://telegram-delivery-bot.onrender.com")
+        app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
 
-    threading.Thread(target=run).start()
-    asyncio.run(application.initialize())
-    asyncio.run(application.start())
-    asyncio.run(application.bot.set_webhook("https://telegram-delivery-bot.onrender.com"))
+    threading.Thread(target=lambda: asyncio.run(main())).start()
