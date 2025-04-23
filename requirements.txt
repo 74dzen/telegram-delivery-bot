@@ -5,3 +5,4 @@ zeep
 pandas
 chardet
 flask
+python-dotenv
