@@ -22,6 +22,8 @@ logger = logging.getLogger(__name__)
 
 # Токен бота из .env
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+if not TOKEN:
+    raise ValueError("❌ Переменная TELEGRAM_BOT_TOKEN не загружена из .env файла!")
 
 # Авторизация СДЭК
 CDEK_CLIENT_ID = "8sADkKf1pgUQtUdSYNFJZulRpLYjOBRK"
