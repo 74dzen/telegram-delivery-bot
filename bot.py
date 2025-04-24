@@ -14,7 +14,6 @@ import chardet
 import re
 import asyncio
 from flask import Flask, request
-import threading
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -126,4 +125,5 @@ if __name__ == "__main__":
         await application.bot.set_webhook("https://telegram-delivery-bot.onrender.com")
         app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
 
-    threading.Thread(target=lambda: asyncio.run(main())).start()
+    # Запускаем асинхронную задачу без threading
+    asyncio.run(main())
