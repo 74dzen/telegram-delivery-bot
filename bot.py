@@ -12,7 +12,6 @@ from dotenv import load_dotenv
 load_dotenv()
 import chardet
 import re
-from flask import Flask, request
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -83,19 +82,6 @@ for key in PRESETS:
     for variant in variants:
         ALT_PRESETS[variant.strip()] = key
 
-# Flask-приложение для Webhook
-app = Flask(__name__)
-
-@app.route('/', methods=['GET', 'HEAD'])
-def index():
-    return 'OK'
-
-@app.route('/', methods=['POST'])
-def webhook():
-    update = Update.de_json(request.get_json(force=True), application.bot)
-    application.create_task(application.process_update(update))
-    return 'OK'
-
 # Обработчики
 async def start(update: Update, context: CallbackContext):
     keyboard = [["СДЭК"], ["DPD"]]
@@ -111,21 +97,11 @@ async def choose_service(update: Update, context: CallbackContext):
     else:
         await update.message.reply_text("Формат: Город_отправки, Город_доставки, Шаблон или Д Ш В Вес, Забор, Доставка, Страховка")
 
-# Telegram приложение
+# Telegram-приложение
 application = Application.builder().token(TOKEN).build()
 application.add_handler(CommandHandler("start", start))
 application.add_handler(MessageHandler(filters.Regex("^(СДЭК|DPD)$"), choose_service))
 
-# Подключаем для gunicorn
-gunicorn_app = app
-
-# Локальный запуск (если нужно тестировать на компе)
+# Запуск через polling
 if __name__ == "__main__":
-    import asyncio
-    async def main():
-        await application.initialize()
-        await application.start()
-        await application.bot.set_webhook("https://telegram-delivery-bot.onrender.com")
-        app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
-    asyncio.run(main())
-
+    application.run_polling()
