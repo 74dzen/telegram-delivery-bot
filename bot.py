@@ -116,11 +116,10 @@ application = Application.builder().token(TOKEN).build()
 application.add_handler(CommandHandler("start", start))
 application.add_handler(MessageHandler(filters.Regex("^(СДЭК|DPD)$"), choose_service))
 
-# Запуск через gunicorn
-if __name__ != "__main__":
-    gunicorn_app = app
+# Подключаем для gunicorn
+gunicorn_app = app
 
-# Для локального запуска
+# Локальный запуск (если нужно тестировать на компе)
 if __name__ == "__main__":
     import asyncio
     async def main():
@@ -129,3 +128,4 @@ if __name__ == "__main__":
         await application.bot.set_webhook("https://telegram-delivery-bot.onrender.com")
         app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
     asyncio.run(main())
+
