@@ -118,12 +118,7 @@ application = Application.builder().token(TOKEN).build()
 application.add_handler(CommandHandler("start", start))
 application.add_handler(MessageHandler(filters.Regex("^(СДЭК|DPD)$"), choose_service))
 
-# Запуск через Flask + Webhook
+# Запуск через Flask + Webhook (с использованием gunicorn)
 if __name__ == "__main__":
-    async def main():
-        await application.initialize()
-        await application.start()
-        await application.bot.set_webhook("https://telegram-delivery-bot.onrender.com")
-        app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)), debug=True)
 
-    threading.Thread(target=lambda: asyncio.run(main())).start()
