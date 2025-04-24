@@ -12,9 +12,7 @@ from dotenv import load_dotenv
 load_dotenv()
 import chardet
 import re
-import asyncio
 from flask import Flask, request
-import threading
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -95,7 +93,7 @@ def index():
 @app.route('/', methods=['POST'])
 def webhook():
     update = Update.de_json(request.get_json(force=True), application.bot)
-    asyncio.get_running_loop().create_task(application.process_update(update))
+    application.create_task(application.process_update(update))
     return 'OK'
 
 # Обработчики
@@ -118,14 +116,16 @@ application = Application.builder().token(TOKEN).build()
 application.add_handler(CommandHandler("start", start))
 application.add_handler(MessageHandler(filters.Regex("^(СДЭК|DPD)$"), choose_service))
 
-# Запуск через Flask + Webhook (с использованием gunicorn)
-# Запуск через Flask + Webhook (с использованием gunicorn)
-@app.before_first_request
-def activate_bot():
+# Запуск через gunicorn
+if __name__ != "__main__":
+    gunicorn_app = app
+
+# Для локального запуска
+if __name__ == "__main__":
+    import asyncio
     async def main():
         await application.initialize()
         await application.start()
         await application.bot.set_webhook("https://telegram-delivery-bot.onrender.com")
+        app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
     asyncio.run(main())
-
-
