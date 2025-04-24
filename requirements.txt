@@ -6,3 +6,4 @@ pandas
 chardet
 flask
 python-dotenv
+gunicorn

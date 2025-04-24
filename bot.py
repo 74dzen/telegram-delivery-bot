@@ -90,7 +90,7 @@ app = Flask(__name__)
 
 @app.route('/', methods=['GET', 'HEAD'])
 def index():
-    return 'OK'
+    return 'OK'  # Это проверка, чтобы увидеть, что сервер работает
 
 @app.route('/', methods=['POST'])
 def webhook():
