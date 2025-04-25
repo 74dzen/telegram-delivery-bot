@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 load_dotenv()
 import chardet
 import re
+import asyncio
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -102,6 +103,6 @@ application = Application.builder().token(TOKEN).build()
 application.add_handler(CommandHandler("start", start))
 application.add_handler(MessageHandler(filters.Regex("^(СДЭК|DPD)$"), choose_service))
 
-# Запуск polling
+# Запуск через polling (надёжно на бесплатных серверах)
 if __name__ == "__main__":
     application.run_polling()
