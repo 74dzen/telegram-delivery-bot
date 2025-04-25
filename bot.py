@@ -18,7 +18,7 @@ import asyncio
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Токен бота из .env
+# Токен из .env
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 if not TOKEN:
     raise ValueError("❌ Переменная TELEGRAM_BOT_TOKEN не загружена из .env файла!")
@@ -103,6 +103,13 @@ application = Application.builder().token(TOKEN).build()
 application.add_handler(CommandHandler("start", start))
 application.add_handler(MessageHandler(filters.Regex("^(СДЭК|DPD)$"), choose_service))
 
-# Запуск через polling (надёжно на бесплатных серверах)
+# Запуск через polling
 if __name__ == "__main__":
-    application.run_polling()
+    async def main():
+        await application.initialize()
+        await application.start()
+        logger.info("✅ Бот запущен в режиме polling")
+        await application.updater.start_polling()
+        await application.updater.idle()
+
+    asyncio.run(main())
