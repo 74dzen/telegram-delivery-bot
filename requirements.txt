@@ -8,3 +8,4 @@ chardet
 pytz
 tzlocal==2.1
 lxml
+aiohttp
