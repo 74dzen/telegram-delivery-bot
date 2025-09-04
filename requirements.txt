@@ -1,8 +1,10 @@
-python-telegram-bot==20.6
+python-telegram-bot>=22.3
+httpx>=0.28.1
 requests
 certifi
 zeep
 pandas
 chardet
-flask
-python-dotenv
+pytz
+tzlocal==2.1
+lxml
