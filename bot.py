@@ -711,4 +711,17 @@ application.add_handler(MessageHandler(filters.Regex("^(СДЭК|DPD)$"), choose
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_input))
 
 if __name__ == "__main__":
-    application.run_polling()
+    # --- Webhook для Render Web Service ---
+    port = int(os.getenv("PORT", "10000"))  # Render передаёт порт в переменной PORT
+    base_url = os.getenv("WEBHOOK_BASE_URL")  # например: https://telegram-delivery-bot-1.onrender.com
+    if not base_url:
+        raise RuntimeError("Не задан WEBHOOK_BASE_URL в переменных окружения Render")
+    path = os.getenv("WEBHOOK_PATH", "webhook")  # можно задать свой секретный путь
+
+    # PTB поднимет aiohttp-сервер и выставит вебхук у Telegram
+    application.run_webhook(
+        listen="0.0.0.0",
+        port=port,
+        url_path=path,
+        webhook_url=f"{base_url.rstrip('/')}/{path}",
+    )
