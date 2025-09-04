@@ -8,4 +8,5 @@ chardet
 pytz
 tzlocal==2.1
 lxml
-aiohttp
+aiohttp>=3.9,<4
+apscheduler<4
