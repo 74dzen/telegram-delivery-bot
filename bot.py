@@ -1,21 +1,28 @@
+# bot.py
 import os
 import logging
-import asyncio
 from datetime import date
-from telegram import Update, ReplyKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackContext, JobQueue
+import re
+import unicodedata
+from difflib import get_close_matches
+
+import asyncio
 import requests
 import certifi
+import pandas as pd
+import chardet
+import pytz
+
+from telegram import Update, ReplyKeyboardMarkup
+from telegram.ext import (
+    Application, CommandHandler, MessageHandler, CallbackContext,
+    filters, JobQueue
+)
+
 from zeep import Client
 from zeep.exceptions import Fault, TransportError
 from zeep.transports import Transport
-import httpx
-import pandas as pd
-import chardet
-import re
-import pytz
-from difflib import get_close_matches
-import unicodedata
+from requests.adapters import HTTPAdapter
 
 # ------------------------------ ЛОГИ ------------------------------ #
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -61,7 +68,6 @@ else:
     GEO_CSV_PATH = os.path.join(os.path.dirname(__file__), "GeographyDPD_20250211.csv")
 
 # ---------------------- МАПИНГ ТАРИФОВ DPD ----------------------- #
-# Человеческие имена тарифов (как в ЛК)
 DPD_SERVICE_ALIASES = {
     "MXO": "DPD Standard",
     "CL":  "DPD Standard",
@@ -69,9 +75,7 @@ DPD_SERVICE_ALIASES = {
     "PCL": "DPD OPTIMUM",
     "BZP": "DPD 18:00",
 }
-# Тарифы, которые показываем (как в веб-кабинете)
 DPD_WHITELIST = {"MXO", "CL", "ECN", "PCL", "BZP"}
-# Для каких сервисов «как на сайте» принудительно ставим курьерский забор
 DPD_FORCE_COURIER_PICKUP = {"BZP"}  # 18:00
 
 # ---------------------------- ПРЕСЕТЫ ---------------------------- #
@@ -196,7 +200,6 @@ def _scan_city_candidates(tokens, start_idx=0):
 
 # ------------------- БЕЗОПАСНАЯ ОТПРАВКА ДЛИННЫХ ТЕКСТОВ -------- #
 async def send_long_message(update: Update, text: str, chunk_size: int = 3500):
-    """Режем ответ, чтобы не упереться в лимит Telegram (~4096)."""
     lines = text.split("\n")
     buf = ""
     for line in lines:
@@ -354,18 +357,24 @@ def calculate_cdek_delivery(city_from, city_to, dims):
     return "\n".join([f"📦 {k}: {v['price']} руб., срок {v['term']}" if v else f"📦 {k}: тариф недоступен"
                       for k, v in categories.items()])
 
-# ------------------------- DPD: SOAP клиент ---------------------- #
+# -------------------------- DPD ТРАНСПОРТ ------------------------ #
 def _build_dpd_client() -> Client:
-    # HTTP-клиент с таймаутами: 10с connect, 20с read/write
-    timeout = httpx.Timeout(connect=10.0, read=20.0, write=20.0, pool=None)
-    http_client = httpx.Client(timeout=timeout)
-    transport = Transport(client=http_client)
+    """
+    Правильный транспорт для zeep: requests.Session + timeout.
+    Без параметра 'client' (его не существует), иначе TypeError.
+    """
+    session = requests.Session()
+    session.verify = certifi.where()
+    adapter = HTTPAdapter(pool_connections=20, pool_maxsize=20)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+
+    transport = Transport(session=session, timeout=20)
     return Client(DPD_WSDL_URL, transport=transport)
 
 # ------------------------------- DPD ----------------------------- #
 def calculate_dpd_delivery_by_codes(code_from: str, code_to: str, rest_tokens):
-    """Считаем тарифы из белого списка; по каждому ЛК отдельно. Для BZP показываем «как на сайте».
-       СИНХРОННАЯ функция — вызывается в фоне через asyncio.to_thread."""
+    """Считаем тарифы из белого списка; по каждому ЛК отдельно. Для BZP показываем «как на сайте»."""
     if len(rest_tokens) < 3:
         return "Ошибка: укажите габариты/пресет и 3 параметра (забор, доставка, объявл. стоимость)."
 
@@ -456,23 +465,6 @@ def calculate_dpd_delivery_by_codes(code_from: str, code_to: str, rest_tokens):
 
     return "\n".join(lines)
 
-# ---------------------- фоновые воркеры-обёртки ------------------ #
-async def _do_calc_and_reply_dpd(update: Update, context: CallbackContext, code_from: str, code_to: str, rest_tokens):
-    try:
-        result = await asyncio.to_thread(calculate_dpd_delivery_by_codes, code_from, code_to, rest_tokens)
-        await send_long_message(update, result)
-    except Exception as e:
-        logger.exception("DPD calc failed")
-        await update.message.reply_text(f"Не удалось выполнить расчёт DPD: {type(e).__name__}: {e}")
-
-async def _do_calc_and_reply_cdek(update: Update, context: CallbackContext, city_from_name: str, city_to_name: str, dims):
-    try:
-        result = await asyncio.to_thread(calculate_cdek_delivery, city_from_name, city_to_name, dims)
-        await send_long_message(update, "Результат расчета:\n" + result)
-    except Exception as e:
-        logger.exception("CDEK calc failed")
-        await update.message.reply_text(f"Не удалось выполнить расчёт СДЭК: {type(e).__name__}: {e}")
-
 # ------------------------------ ПОДСКАЗКИ ------------------------ #
 def _format_candidate_line(i, code, name, type_abbr, subject):
     typ = f", {type_abbr}" if type_abbr else ""
@@ -480,7 +472,6 @@ def _format_candidate_line(i, code, name, type_abbr, subject):
     return f"{i}) {name}{typ}{subj} — код {code}"
 
 async def _prompt_city_selection_single(update: Update, which: str, candidates):
-    # сортируем: города ("г") выше, ограничиваем до 25
     def _score(c):
         _code, _name, t, _subj = c
         return 0 if str(t).strip().lower().startswith("г") else 1
@@ -627,6 +618,30 @@ async def _resolve_cities_or_ask(update: Update, context: CallbackContext, servi
     await update.message.reply_text("Неожиданный формат разбора. Попробуйте уточнить города.")
     return None
 
+async def _do_calc_and_reply_dpd(update: Update, code_from: str, code_to: str, rest):
+    try:
+        result = await asyncio.to_thread(calculate_dpd_delivery_by_codes, code_from, code_to, rest)
+        await send_long_message(update, result)
+    except Exception as e:
+        logger.error("DPD calc failed", exc_info=True)
+        await update.message.reply_text(f"Не удалось выполнить расчёт DPD: {type(e).__name__}: {e}")
+
+async def _do_calc_and_reply_cdek(update: Update, code_from: str, code_to: str, rest):
+    city_from_name = name_by_code(code_from); city_to_name = name_by_code(code_to)
+    if not city_from_name or not city_to_name:
+        await update.message.reply_text("Нашёл коды городов, но не смог восстановить названия. Проверьте ввод.")
+        return
+    dims = parse_dims_tokens(rest)
+    if dims is None:
+        await update.message.reply_text("Ошибка: не распознаны габариты. Укажите 4 числа или шаблон.")
+        return
+    try:
+        result = await asyncio.to_thread(calculate_cdek_delivery, city_from_name, city_to_name, dims)
+        await send_long_message(update, "Результат расчета:\n" + result)
+    except Exception as e:
+        logger.error("CDEK calc failed", exc_info=True)
+        await update.message.reply_text(f"Не удалось выполнить расчёт СДЭК: {type(e).__name__}: {e}")
+
 async def handle_input(update: Update, context: CallbackContext):
     text = update.message.text.strip()
     logger.info("update in, text=%r", text)
@@ -653,18 +668,11 @@ async def handle_input(update: Update, context: CallbackContext):
 
         rest = st['rest']; service = st['service']
         context.user_data.pop('city_select_both', None)
+        await update.message.reply_text("Считаю... это может занять до 10–20 секунд.")
         if service == "DPD":
-            await update.message.reply_text("Считаю… это может занять до 10–20 секунд.")
-            asyncio.create_task(_do_calc_and_reply_dpd(update, context, code_from, code_to, rest))
+            await _do_calc_and_reply_dpd(update, code_from, code_to, rest)
         else:
-            name_from = name_by_code(code_from); name_to = name_by_code(code_to)
-            if not name_from or not name_to:
-                await update.message.reply_text("Коды городов выбраны, но не удалось восстановить названия для CDEK."); return
-            dims = parse_dims_tokens(rest)
-            if dims is None:
-                await update.message.reply_text("Ошибка: не распознаны габариты. Укажите 4 числа или шаблон."); return
-            await update.message.reply_text("Считаю… это может занять до 10–20 секунд.")
-            asyncio.create_task(_do_calc_and_reply_cdek(update, context, name_from, name_to, dims))
+            await _do_calc_and_reply_cdek(update, code_from, code_to, rest)
         return
 
     # Режим выбора одного города
@@ -691,18 +699,11 @@ async def handle_input(update: Update, context: CallbackContext):
             context.user_data.pop('city_select_single', None); return
 
         context.user_data.pop('city_select_single', None)
+        await update.message.reply_text("Считаю... это может занять до 10–20 секунд.")
         if service == "DPD":
-            await update.message.reply_text("Считаю… это может занять до 10–20 секунд.")
-            asyncio.create_task(_do_calc_and_reply_dpd(update, context, code_from, code_to, rest))
+            await _do_calc_and_reply_dpd(update, code_from, code_to, rest)
         else:
-            name_from = name_by_code(code_from); name_to = name_by_code(code_to)
-            if not name_from or not name_to:
-                await update.message.reply_text("Коды городов выбраны, но не удалось восстановить названия для CDEK."); return
-            dims = parse_dims_tokens(rest)
-            if dims is None:
-                await update.message.reply_text("Ошибка: не распознаны габариты. Укажите 4 числа или шаблон."); return
-            await update.message.reply_text("Считаю… это может занять до 10–20 секунд.")
-            asyncio.create_task(_do_calc_and_reply_cdek(update, context, name_from, name_to, dims))
+            await _do_calc_and_reply_cdek(update, code_from, code_to, rest)
         return
 
     # Обычный режим
@@ -716,33 +717,17 @@ async def handle_input(update: Update, context: CallbackContext):
         return
     code_from, code_to, rest = resolved
 
+    await update.message.reply_text("Считаю... это может занять до 10–20 секунд.")
     if service == "СДЭК":
-        dims = parse_dims_tokens(rest)
-        if dims is None:
-            await update.message.reply_text("Ошибка: не распознаны габариты. Укажите 4 числа (Д Ш В Вес) или шаблон.")
-            return
-        city_from_name = name_by_code(code_from); city_to_name = name_by_code(code_to)
-        if not city_from_name or not city_to_name:
-            await update.message.reply_text("Нашёл коды городов, но не смог восстановить названия. Проверьте ввод.")
-            return
-        await update.message.reply_text("Считаю… это может занять до 10–20 секунд.")
-        asyncio.create_task(_do_calc_and_reply_cdek(update, context, city_from_name, city_to_name, dims))
+        await _do_calc_and_reply_cdek(update, code_from, code_to, rest)
     else:
-        await update.message.reply_text("Считаю… это может занять до 10–20 секунд.")
-        asyncio.create_task(_do_calc_and_reply_dpd(update, context, code_from, code_to, rest))
+        await _do_calc_and_reply_dpd(update, code_from, code_to, rest)
 
 # --------------- ФИКС PTB/APScheduler: pytz-таймзона ---------------- #
 JobQueue.scheduler_configuration = {"timezone": pytz.UTC}
 job_queue = JobQueue()
 
 application = Application.builder().token(TOKEN).job_queue(job_queue).build()
-
-# error-handler — чтобы видеть любые исключения
-async def on_error(update: object, context: CallbackContext) -> None:
-    logger.exception("Unhandled error", exc_info=context.error)
-
-application.add_error_handler(on_error)
-
 application.add_handler(CommandHandler("start", start))
 application.add_handler(MessageHandler(filters.Regex("^(СДЭК|DPD)$"), choose_service))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_input))
@@ -755,8 +740,6 @@ if __name__ == "__main__":
         raise RuntimeError("Не задан WEBHOOK_BASE_URL в переменных окружения Render")
     path = os.getenv("WEBHOOK_PATH", "webhook")  # можно задать свой секретный путь
 
-    # PTB поднимет aiohttp-сервер и выставит вебхук у Telegram
-    logger.info("Starting webhook on port %s, path '%s'", port, path)
     application.run_webhook(
         listen="0.0.0.0",
         port=port,
