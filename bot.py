@@ -1,5 +1,6 @@
 import os
 import logging
+import asyncio
 from datetime import date
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackContext, JobQueue
@@ -7,6 +8,8 @@ import requests
 import certifi
 from zeep import Client
 from zeep.exceptions import Fault, TransportError
+from zeep.transports import Transport
+import httpx
 import pandas as pd
 import chardet
 import re
@@ -351,9 +354,18 @@ def calculate_cdek_delivery(city_from, city_to, dims):
     return "\n".join([f"📦 {k}: {v['price']} руб., срок {v['term']}" if v else f"📦 {k}: тариф недоступен"
                       for k, v in categories.items()])
 
+# ------------------------- DPD: SOAP клиент ---------------------- #
+def _build_dpd_client() -> Client:
+    # HTTP-клиент с таймаутами: 10с connect, 20с read/write
+    timeout = httpx.Timeout(connect=10.0, read=20.0, write=20.0, pool=None)
+    http_client = httpx.Client(timeout=timeout)
+    transport = Transport(client=http_client)
+    return Client(DPD_WSDL_URL, transport=transport)
+
 # ------------------------------- DPD ----------------------------- #
-async def calculate_dpd_delivery_by_codes(code_from: str, code_to: str, rest_tokens):
-    """Считаем тарифы из белого списка; по каждому ЛК отдельно. Для BZP показываем «как на сайте»."""
+def calculate_dpd_delivery_by_codes(code_from: str, code_to: str, rest_tokens):
+    """Считаем тарифы из белого списка; по каждому ЛК отдельно. Для BZP показываем «как на сайте».
+       СИНХРОННАЯ функция — вызывается в фоне через asyncio.to_thread."""
     if len(rest_tokens) < 3:
         return "Ошибка: укажите габариты/пресет и 3 параметра (забор, доставка, объявл. стоимость)."
 
@@ -367,7 +379,7 @@ async def calculate_dpd_delivery_by_codes(code_from: str, code_to: str, rest_tok
     user_self_pickup = (pickup_type != 'курьер')
     user_self_delivery = (delivery_type != 'курьер')
 
-    client = Client(DPD_WSDL_URL)
+    client = _build_dpd_client()
     dims_list = dims if isinstance(dims, list) else [dims]
 
     lines = ["Результат расчета (полный список тарифов):"]
@@ -443,6 +455,23 @@ async def calculate_dpd_delivery_by_codes(code_from: str, code_to: str, rest_tok
                 lines.append(f"   • как на сайте: {round(v['cost'], 2)} ₽, срок {v['days']} дн")
 
     return "\n".join(lines)
+
+# ---------------------- фоновые воркеры-обёртки ------------------ #
+async def _do_calc_and_reply_dpd(update: Update, context: CallbackContext, code_from: str, code_to: str, rest_tokens):
+    try:
+        result = await asyncio.to_thread(calculate_dpd_delivery_by_codes, code_from, code_to, rest_tokens)
+        await send_long_message(update, result)
+    except Exception as e:
+        logger.exception("DPD calc failed")
+        await update.message.reply_text(f"Не удалось выполнить расчёт DPD: {type(e).__name__}: {e}")
+
+async def _do_calc_and_reply_cdek(update: Update, context: CallbackContext, city_from_name: str, city_to_name: str, dims):
+    try:
+        result = await asyncio.to_thread(calculate_cdek_delivery, city_from_name, city_to_name, dims)
+        await send_long_message(update, "Результат расчета:\n" + result)
+    except Exception as e:
+        logger.exception("CDEK calc failed")
+        await update.message.reply_text(f"Не удалось выполнить расчёт СДЭК: {type(e).__name__}: {e}")
 
 # ------------------------------ ПОДСКАЗКИ ------------------------ #
 def _format_candidate_line(i, code, name, type_abbr, subject):
@@ -600,6 +629,7 @@ async def _resolve_cities_or_ask(update: Update, context: CallbackContext, servi
 
 async def handle_input(update: Update, context: CallbackContext):
     text = update.message.text.strip()
+    logger.info("update in, text=%r", text)
 
     # Режим выбора обоих городов
     if 'city_select_both' in context.user_data:
@@ -624,8 +654,8 @@ async def handle_input(update: Update, context: CallbackContext):
         rest = st['rest']; service = st['service']
         context.user_data.pop('city_select_both', None)
         if service == "DPD":
-            result = await calculate_dpd_delivery_by_codes(code_from, code_to, rest)
-            await send_long_message(update, result)
+            await update.message.reply_text("Считаю… это может занять до 10–20 секунд.")
+            asyncio.create_task(_do_calc_and_reply_dpd(update, context, code_from, code_to, rest))
         else:
             name_from = name_by_code(code_from); name_to = name_by_code(code_to)
             if not name_from or not name_to:
@@ -633,8 +663,8 @@ async def handle_input(update: Update, context: CallbackContext):
             dims = parse_dims_tokens(rest)
             if dims is None:
                 await update.message.reply_text("Ошибка: не распознаны габариты. Укажите 4 числа или шаблон."); return
-            result = calculate_cdek_delivery(name_from, name_to, dims)
-            await send_long_message(update, "Результат расчета:\n" + result)
+            await update.message.reply_text("Считаю… это может занять до 10–20 секунд.")
+            asyncio.create_task(_do_calc_and_reply_cdek(update, context, name_from, name_to, dims))
         return
 
     # Режим выбора одного города
@@ -662,8 +692,8 @@ async def handle_input(update: Update, context: CallbackContext):
 
         context.user_data.pop('city_select_single', None)
         if service == "DPD":
-            result = await calculate_dpd_delivery_by_codes(code_from, code_to, rest)
-            await send_long_message(update, result)
+            await update.message.reply_text("Считаю… это может занять до 10–20 секунд.")
+            asyncio.create_task(_do_calc_and_reply_dpd(update, context, code_from, code_to, rest))
         else:
             name_from = name_by_code(code_from); name_to = name_by_code(code_to)
             if not name_from or not name_to:
@@ -671,8 +701,8 @@ async def handle_input(update: Update, context: CallbackContext):
             dims = parse_dims_tokens(rest)
             if dims is None:
                 await update.message.reply_text("Ошибка: не распознаны габариты. Укажите 4 числа или шаблон."); return
-            result = calculate_cdek_delivery(name_from, name_to, dims)
-            await send_long_message(update, "Результат расчета:\n" + result)
+            await update.message.reply_text("Считаю… это может занять до 10–20 секунд.")
+            asyncio.create_task(_do_calc_and_reply_cdek(update, context, name_from, name_to, dims))
         return
 
     # Обычный режим
@@ -695,17 +725,24 @@ async def handle_input(update: Update, context: CallbackContext):
         if not city_from_name or not city_to_name:
             await update.message.reply_text("Нашёл коды городов, но не смог восстановить названия. Проверьте ввод.")
             return
-        result = calculate_cdek_delivery(city_from_name, city_to_name, dims)
-        await send_long_message(update, "Результат расчета:\n" + result)
+        await update.message.reply_text("Считаю… это может занять до 10–20 секунд.")
+        asyncio.create_task(_do_calc_and_reply_cdek(update, context, city_from_name, city_to_name, dims))
     else:
-        result = await calculate_dpd_delivery_by_codes(code_from, code_to, rest)
-        await send_long_message(update, result)
+        await update.message.reply_text("Считаю… это может занять до 10–20 секунд.")
+        asyncio.create_task(_do_calc_and_reply_dpd(update, context, code_from, code_to, rest))
 
 # --------------- ФИКС PTB/APScheduler: pytz-таймзона ---------------- #
 JobQueue.scheduler_configuration = {"timezone": pytz.UTC}
 job_queue = JobQueue()
 
 application = Application.builder().token(TOKEN).job_queue(job_queue).build()
+
+# error-handler — чтобы видеть любые исключения
+async def on_error(update: object, context: CallbackContext) -> None:
+    logger.exception("Unhandled error", exc_info=context.error)
+
+application.add_error_handler(on_error)
+
 application.add_handler(CommandHandler("start", start))
 application.add_handler(MessageHandler(filters.Regex("^(СДЭК|DPD)$"), choose_service))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_input))
@@ -719,6 +756,7 @@ if __name__ == "__main__":
     path = os.getenv("WEBHOOK_PATH", "webhook")  # можно задать свой секретный путь
 
     # PTB поднимет aiohttp-сервер и выставит вебхук у Telegram
+    logger.info("Starting webhook on port %s, path '%s'", port, path)
     application.run_webhook(
         listen="0.0.0.0",
         port=port,
