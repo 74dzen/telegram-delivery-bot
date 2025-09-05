@@ -696,7 +696,19 @@ application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_i
 # ------------------------- СТАРТ ДЛЯ RENDER ---------------------- #
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "10000"))
-    base_url = os.getenv("WEBHOOK_BASE_URL")  # например: https://telegram-delivery-bot-1-l5k6.onrender.com
+    base_url = os.getenv("WEBHOOK_BASE_URL")  # https://<твой-сервис>.onrender.com
     if not base_url or not base_url.startswith("https://"):
         raise RuntimeError("WEBHOOK_BASE_URL должен быть https:// и задан в переменных окружения")
-    path = os.getenv("WEBHOOK_PATH", "webhook")._
+
+    path = os.getenv("WEBHOOK_PATH", "webhook").lstrip("/")
+    full_webhook_url = f"{base_url.rstrip('/')}/{path}"
+
+    logger.info("Booting bot... binding http on 0.0.0.0:%s, path=/%s", port, path)
+    logger.info("Planned webhook URL: %s", full_webhook_url)
+
+    application.run_webhook(
+        listen="0.0.0.0",
+        port=port,
+        url_path=path,
+        webhook_url=full_webhook_url,  # ставим вебхук один раз здесь
+    )
